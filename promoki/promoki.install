@@ -1,0 +1,105 @@
+<?php
+
+/**
+ * @file
+ *   promoki.install
+ *
+ * Installation file for the Promoki module
+ */
+
+
+/**
+ * Implementation of hook_requirements().
+ *
+ * Checks to ensure any required library is installed/enabled. 
+ */
+function promoki_requirements($phase) {
+  $t = get_t();
+
+  // Promoki requires cURL.
+  $has_curl = function_exists('curl_init');
+  $requirements['promoki_curl'] = array(
+    'title' => $t('cURL'),
+    'value' => $has_curl ? $t('Enabled') : $t('Not found'),
+  );
+  if (!$has_curl) {
+    $requirements['promoki_curl']['severity'] = REQUIREMENT_ERROR;
+    $requirements['promoki_curl']['description'] = $t("Promoki requires the PHP <a href='!curl_url'>cURL</a> library.", array('!curl_url' => 'http://php.net/manual/en/curl.setup.php'));
+  }
+
+  return $requirements;
+}
+
+
+/**
+ * Implementation of hook_schema().
+ */
+function promoki_schema() {
+
+  $schema = array();
+
+  $schema['promoki_recent_winners'] = array(
+    'description' => 'Keeps track of the recent promo winners to help prevent repeat winners.',
+    'fields' => array(
+      'email' => array(
+        'description' => "Primary key: the email address of the winner.",
+        'type' => 'varchar',
+        'length' => 31,
+        'not null' => TRUE,
+      ),
+      'name' => array(
+        'description' => 'The name (both or first) name of the winner.',
+        'type' => 'varchar',
+        'length' => 63,
+        'default' => '',
+      ),
+			'note' => array(
+			  'description' => 'Any brief note about the winner (their prize, etc.)',
+				'type' => 'varchar',
+				'length' => 255,
+				'default' => '',
+			),
+			'timestamp' => array(
+			  'description' => 'The timestamp of the choosing of this winner.',
+				'type' => 'int',
+				'unsigned' => TRUE,
+				'default' => 0,
+			),
+			'batch_size' => array(
+			  'description' => 'The number of winners in the batch that this winner was chosen in.',
+				'type' => 'int',
+				'unsigned' => TRUE,
+				'default' => 1,
+			),
+    ),
+    'primary key' => array('email')
+  );
+
+  return $schema;
+}
+
+
+/**
+ * Implementation of hook_install().
+ *
+ * Installs the Promoki module.
+ */
+function promoki_install() {
+  // Set the module weight so it can override other modules.
+  db_query("UPDATE {system} SET weight = 99 WHERE name = 'promoki'");
+  // install the schema for the database
+  drupal_install_schema('promoki');
+}
+
+
+/**
+ * Implementation of hook_uninstall()
+ *
+ * Uninstalls the Promoki module.
+ */
+function promoki_uninstall() {
+  // Remove the schema
+  drupal_uninstall_schema('promoki');
+	// Remove relevant data from the DB
+  db_query("DELETE FROM {variable} WHERE name LIKE 'promoki_%%'");
+}

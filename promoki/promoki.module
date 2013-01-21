@@ -1,0 +1,800 @@
+<?php
+
+/**
+ * @file - promoki.module
+ *
+ * Aids in the random selection and recording of winners of a promotion.
+ *
+ * @creation January 2013
+ * @author Rod Jackson (RDJ)
+ */
+ 
+require_once("telemo.callfire_lib.php");
+require_once("telemo.twilio_lib.php");
+require_once("telemo.telemo_lib.php");
+require_once("telemo.routines.inc");
+require_once("telemo.notify.inc");
+
+define('???_WEBSITE', "https://???.com");
+
+define('???_NOTIFY_URL', "promoki/???/notify");
+
+
+/**
+ * Settings form for the Promoki module.
+ */
+function promoki_settings_form() {
+
+	$form = array();
+
+  $form['promoki_settings'] = array(
+		'#type' => 'fieldset',
+    '#title' => t('Promoki settings'),
+		'#collapsible' => FALSE,
+		'#collapsed' => FALSE,
+  );
+	$form['promoki_settings']['promoki_winner_source'] = array(
+    '#type' => 'select',
+		'#title' => t("Source of winners"),
+    '#summary arguments' => array(variable_get('promoki_winner_source', 'users')),
+		'#options' => _promoki_winner_source_array(),
+		'#default_value' => variable_get('promoki_winner_source', 'users'),
+		'#description' => t('What data set to choose the promo winners from.'),
+	);
+	$form['promoki_settings']['promoki_winner_source_account'] = array(
+    '#type' => 'textfield',
+		'#title' => t("Source of winners"),
+    '#summary' => t('Stored GetResponse.com account: !acct', array('!acct' => variable_get('promoki_winner_source_account', ''))),
+		'#default_value' => variable_get('promoki_winner_source_account', ''),
+		'#description' => t('The account...'),
+	);
+	$form['promoki_settings']['promoki_winner_source_key'] = array(
+    '#type' => 'textfield',
+		'#title' => t("Source of winners"),
+    '#summary' => t('Stored GetResponse.com account key: !key', array('!key' => variable_get('promoki_winner_source_key', ''))),
+		'#default_value' => variable_get('promoki_winner_source_key', ''),
+		'#description' => t('The access key for your GetResponse.com account.'),
+	);
+	$form['promoki_settings']['promoki_admin_email'] = array(
+	  '#type' => 'textfield',
+		'#title' => t("Admin notification email"),
+    '#summary' => t('Admin notification email: !email', array('!email' => variable_get('promoki_admin_email', ''))),
+    '#default_value' => variable_get('promoki_admin_email', ''),
+		'#description' => t('Email address of the admin to send reminder notifications and error messages to.'),
+	);
+	$np = variable_get('promoki_next_promo', array('day' => 1, 'month' => 1, 'year' => date('Y')+1));
+	$form['promoki_settings']['promoki_next_promo'] = array(
+    '#type' => 'date',
+		'#title' => 'Date of next promo',
+    '#summary' => t('Date of next promo: !date', array('!date' => date('D, M j Y', mktime(0, 0, 0, $np['month'], $np['day'], $np['year'])))),
+    '#default_value' => $np,
+		'#description' => t('Date of the next intended promo. The admin will be reminded by email one day before the specified date.'),
+	);
+	$form['promoki_settings']['promoki_last_win_delay'] = array(
+		'#type' => 'textfield',
+		'#title' => t('Delay for repeat winners'),
+		'#default_value' => variable_get('promoki_last_win_delay', '90'),
+    '#summary' => t('Delay (in days) before allowing a repeat winner: !days', array('!days' => variable_get('promoki_last_win_delay', '90'))),
+		'#description' => t('How many days to wait before allowing a promo winner to win again. (Enter 0 to have no waiting period.)'),
+	);
+	$form['promoki_settings']['promoki_allow_admins'] = array(
+		'#type' => 'checkbox',
+		'#title' => t('Allow website admins to be winners.'),
+		'#summary callback' => 'summarize_checkbox',
+		'#summary arguments' => array(t('Website admins are allowed to be winners.'), t('Website admins are NOT allowed to be winners.')),
+		'#default_value' => variable_get('promoki_allow_admins', FALSE),
+	);
+
+  $form['promoki_info'] = array(
+		'#type' => 'fieldset',
+    '#title' => t('Promoki general info'),
+		'#collapsible' => TRUE,
+		'#collapsed' => TRUE,
+  );
+	$last_use_date = date('l, F j, Y', variable_get('promoki_last_use_date', 0));
+	$form['promoki_info']['promoki_last_use_date'] = array(
+		'#type' => 'item',
+		'#title' => t('Last use date'),
+		'#description' => t('Date of the last use of Promoki (where new winners were actually recorded.)'),
+		'#value' => $last_use_date,
+		'#summary' => 'Last use date: ' . $last_use_date,
+	);
+	$form['promoki_info']['promoki_num_last_winners'] = array(
+		'#type' => 'item',
+		'#title' => t('Number of winners chosen last'),
+		'#description' => t('Actual number of winners chosen by the admin during the last use.'),
+		'#value' => variable_get('promoki_num_last_winners', 0),
+		'#summary' => 'Number of winners chosen during last use: ' . variable_get('promoki_num_last_winners', 0),
+	);
+	$form['promoki_info']['promoki_total_winners'] = array(
+		'#type' => 'item',
+		'#title' => t('Total number of winners'),
+		'#description' => t("Total number of winners chosen by the admins since Promoki's install."),
+		'#value' => variable_get('promoki_total_winners', 0),
+		'#summary' => 'Total number of winners chosen: ' . variable_get('promoki_total_winners', 0),
+	);
+
+	return system_settings_form($form);
+	
+} // end function - promoki_settings_form
+
+
+/**
+ * Validate Promoki settings.
+ */
+function promoki_settings_form_validate($form, &$form_state) {
+
+	$err = FALSE;
+	$vals = $form_state['values'];
+	
+	// ensure promoki_last_win_delay is a non-negative number
+	$last_win_delay = $vals['promoki_last_win_delay'];
+	if ($last_win_delay === '') {$last_win_delay = 0;}
+	if (is_numeric($last_win_delay)) {
+		$last_win_delay = (integer) $last_win_delay;
+		if ($last_win_delay < 0) {
+			$err = TRUE;
+			form_set_error('promoki_last_win_delay', t('The delay before a winner is allowed to win again must be a positive number, or zero.'));
+			
+		}
+		else {
+			variable_set('promoki_last_win_delay', $last_win_delay);
+		}
+	}
+	else {
+		$err = TRUE;
+		form_set_error('promoki_last_win_delay', t('The delay before a winner is allowed to win again must be a positive number, or zero.'));
+	}
+		
+} // end function - promoki_settings_form_validate
+
+
+/**
+ * Form to display, in groups of 20 or so per page, the previous
+ * promo winners, and their basic info, including a note about
+ * each. This form also allows the editing of these notes, and
+ * the display of specific pages of winners, and sorting options.
+ */
+function promoki_winners_form() {
+
+	$form = array();
+
+	$form['promoki_winners_form_disabled'] = array(
+		'#type' => 'item',
+		'#title' => t('Previous winners'),
+		'#value' => "<br /><strong>This feature is currently disabled.</strong>",
+	);
+	
+	return $form;
+}
+
+/**
+ *
+ */
+function promoki_winners_form_validate($form, &$form_state) {
+
+}
+
+
+/**
+ *
+ */
+function promoki_winners_form_submit($form, &$form_state) {
+
+}
+
+
+/**
+ * Form allowing the admin to begin the process of choosing &
+ * recording a randomized selection of promo winners.
+ */
+function promoki_select_form() {
+
+	// use the other forms if we're beyond the first stage
+	$stage = $_GET['stage'];
+	if ($stage == 'choose') {
+		return promoki_selection_choose_form();
+	}
+	elseif ($stage == 'finished') {
+		return promoki_select_finished_form();
+	}
+	
+	// otherwise use this form, the first one in the process
+	$form = array();
+	
+	$form['promoki_select_step_1'] = array(
+		'#type' => 'item',
+		'#title' => t('STEP 1 OF 3'),
+	);
+	$form['promoki_select_num_randoms'] = array(
+		'#type' => 'textfield',
+		'#title' => t("Number of random potential winners"),
+    '#default_value' => variable_get('promoki_select_num_randoms', '10'),
+		'#description' => t('The number of potential winners to randomly select and present. The admin can select a number of potential winners larger than needed; next page will allow choosing actual winners from that pool, so that unavailable or ineligible candidates can be screened out.'),
+	);
+	$form['promoki_select_go_button'] = array(
+		'#type' => 'submit',
+		'#value' => t('SELECT'),
+		'#submit' => array('promoki_select_form_submit'),
+		'#validate' => array('promoki_select_form_validate'),
+	);
+
+	return $form;
+}
+
+
+/**
+ *
+ */
+function promoki_select_form_validate($form, &$form_state) {
+
+	$err = FALSE;
+	$vals = $form_state['values'];
+	
+	// ensure promoki_select_num_randoms is a positive number
+	$num_randoms = $vals['promoki_select_num_randoms'];
+	if ($num_randoms === '') {$num_randoms = 0;}
+	if (is_numeric($num_randoms)) {
+		$num_randoms = (integer) $num_randoms;
+		if (($num_randoms < 1) || ($num_randoms > 100)) {
+			$err = TRUE;
+			form_set_error('promoki_select_num_randoms', t('Number of potential winners to be randomly selected must be from 1 to 100, inclusive.'));
+			
+		}
+		else {
+			variable_set('promoki_select_num_randoms', $num_randoms);
+		}
+	}
+	else {
+		$err = TRUE;
+		form_set_error('promoki_select_num_randoms', t('Number of potential winners to be randomly selected must be from 1 to 100, inclusive.'));
+	}
+
+}
+
+
+/**
+ *
+ */
+function promoki_select_form_submit($form, &$form_state) {
+
+	$vals = $form_state['values'];
+	$num_randoms = $vals['promoki_select_num_randoms'];
+
+	$selection = promoki_get_random_selection($num_randoms);
+	
+	variable_set('promoki_randomly_selected_potential_winners', $selection);
+	variable_set('promoki_choose_winner_list', array());
+
+	$form_state['redirect'] = 'admin/settings/promoki/select?stage=choose';
+}
+
+
+/**
+ * Form allowing the admin to choose which specific potential
+ * winners to actually *be* winners once the randomized pool
+ * of potential winners is created. This extra step is
+ * included to allow for the possibility of creating a larger-
+ * than-needed pool, and skipping over winners who can't
+ * be contacted, are ineligible, etc. while still pulling the
+ * number of winners needed. For example, if 10 winners are
+ * ultimately needed, an intial randomized pool of 20 potential
+ * winners could be created; the admin could start from the
+ * top and attempt to contact and/or verify each one. The first
+ * ten that respond and are eligible are chosen in the list,
+ * and they're the ones that will actually be recorded.
+ */
+function promoki_selection_choose_form() {
+	
+	$opts = variable_get('promoki_randomly_selected_potential_winners', array());
+
+	$form = array();
+		
+	$form['promoki_select_step_2'] = array(
+		'#type' => 'item',
+		'#title' => t('STEP 2 OF 3'),
+	);
+	$form['promoki_choose_winner_list'] = array(
+    '#type' => 'select',
+		'#title' => t("Potential winners"),
+		'#options' => $opts,
+		'#multiple' => TRUE,
+		'#size' => max(5, min(20, count($opts))), // min 5 lines on display, maximum 20 lines
+		'#description' => t('Random selection of potential winners to choose from.'),
+	);
+	$form['promoki_choose_all_randoms'] = array(
+		'#type' => 'checkbox',
+		'#title' => t('Choose all of the random selection as winners.'),
+		'#default_value' => variable_get('promoki_choose_all_randoms', FALSE),
+	);
+		$form['promoki_choose_export_filename'] = array(
+		'#type' => 'textfile',
+		'#title' => t('Export filename'),
+		'#default_value' => variable_get('promoki_choose_export_filename', 'promoki_winners'),
+		'#description' => t("Local filename (without an extension) on the admin's computer to export the winners to."),
+	);
+	$form['promoki_choose_export_format'] = array(
+    '#type' => 'select',
+		'#title' => t("Export file format"),
+		'#options' => array('none' => 'None', 'csv' => 'CSV', 'xml' => 'XML', 'json' => 'JSON'),
+		'#default_value' => variable_get('promoki_choose_export_format', 'none'),
+		'#description' => t("Format of the exported file. 'None' will have no file be exported. Export options are XML, J-SON and CSV."),
+	);
+	$form['promoki_choose_go_button'] = array(
+		'#type' => 'submit',
+		'#value' => t('RECORD CHOSEN WINNERS'),
+		'#submit' => array('promoki_selection_choose_form_submit'),
+		'#validate' => array('promoki_selection_choose_form_validate'),
+	);
+
+	return $form;
+}
+
+/**
+ *
+ */
+function promoki_selection_choose_form_validate($form, &$form_state) {
+
+	$err = FALSE;
+	$vals = $form_state['values'];
+	
+	$all_randoms = $vals['promoki_choose_all_randoms'];
+	$num_chosen = count($vals['promoki_choose_winner_list']);
+	
+	if ((!$all_randoms) && ($num_chosen < 1)) {
+		$err = TRUE;
+		form_set_error('promoki_choose_winner_list', t('At least one winner must be chosen to proceed.'));
+	}
+
+}
+
+
+/**
+ *
+ */
+function promoki_selection_choose_form_submit($form, &$form_state) {
+	
+	$vals = $form_state['values'];
+	if ($vals['promoki_choose_all_randoms']) {
+		$winner_list = variable_get('promoki_randomly_selected_potential_winners', array());
+	}
+	else {
+		$winner_list = $vals['promoki_choose_winner_list'];
+	}
+	$num_last_winners = count($winner_list);
+	$total_winners = variable_get('promoki_total_winners', 0);
+	
+	// if somehow there were no winners chosen, its highly likely
+	// there were no winners given as a random selection: ERROR!
+	if ($num_last_winners < 1) {
+		drupal_set_message("Unresolvable error: no winners were chosen/selected. Try starting the selection process over by clicking the 'SELECT' tab near the top of the module page.", 'error', FALSE);
+		return;
+	}
+	
+	variable_set('promoki_last_use_date', time());
+	variable_set('promoki_num_last_winners', $num_last_winners);
+	variable_set('promoki_total_winners', $total_winners + $num_last_winners);
+
+	variable_set('promoki_randomly_selected_potential_winners', array());
+	variable_set('promoki_just_finished', TRUE);
+	
+	$form_state['redirect'] = 'admin/settings/promoki/select?stage=finished';
+}
+
+
+/**
+ *
+ */
+function promoki_select_finished_form() {
+		
+	$t = variable_get('promoki_last_use_date', 0);
+	$d = date('Y/m/d', $t);
+	$batch_size = variable_get('promoki_num_last_winners', 0);
+	$winners = variable_get('promoki_choose_winner_list', array());
+
+	$just_done = variable_get('promoki_just_finished', FALSE);
+	if ($just_done) {
+		// record the winners in the database
+		foreach ($winners as $key => $winner) {
+			db_query("INSERT INTO {promoki_recent_winners} (email, timestamp, batch_size) VALUES ('%s', %d, %d)", $key, $t, $batch_size);
+		}
+		// email the winner list to the admin
+		$email = variable_get('promoki_admin_email', '');
+		$subj = 'Promoki Winner Selection: ' . $d;
+		$text = "This is an alert from the Promoki module of your website.\nA selection of winners was recently chosen, detailed below.\n\n";
+		foreach ($winners as $key => $winner) {
+			$text .= "  " . $key . "\n";
+		}
+		drupal_mail();
+		// export the winner list
+		// note that we've done all the recording and such
+		variable_set('promoki_just_finished', FALSE);
+	}
+	
+	$message = 'Process complete! ' . $batch_size . ' new winners were chosen and recorded, on' . $d . '.';
+	
+	$format = variable_get('promoki_choose_export_format', 'none');
+	if (($format == 'none') && ($just_done)) {
+		$msg_add = '';
+	}
+	else {
+		$msg_add = '<br /><br />The export of the winners file should begin in a few seconds. If it does not, please click <a href="">HERE</a> to begin the download.';
+	}
+	$message .= $msg_add;
+	
+	$winners_disp = '<br />';
+	foreach ($winners as $key => $winner) {
+		$winners_disp .= '<strong>' . $winner . '</strong><br />';
+	}
+	
+	$form = array();
+
+	$form['promoki_select_step_3'] = array(
+		'#type' => 'item',
+		'#title' => t('STEP 3 OF 3'),
+	);
+	$form['promoki_select_finished_announce'] = array(
+		'#type' => 'item',
+		'#title' => t('FINISHED'),
+		'#value' = > $message;
+	);
+	$form['promoki_select_finished_winners'] = array(
+		'#type' => 'item',
+		'#title' => t('Winners'),
+		'#value' = > $winners_disp,
+		'#description' => t('These are the winners from the last Promoki selection.'),
+	);
+
+	// before returning the form, if there's an export,
+	// setup a header to start it in a few seconds
+	$x = variable_get('promoki_choose_export_format', 'none');
+	$f = variable_get('promoki_choose_export_filename' , '');
+	if (($x != 'none') && ($f != '')) {
+		$data = promoki_create_export_data($winners, $x);
+		$d = 'promoki_export_data_' . time();
+		variable_set($d, $data);
+		$url = '/admin/settings/promoki/export_winners?ext=' . $x . '&filename=' . $f . '&datavarname=' . $d;
+		$header = 'Refresh: 4; url="' . $url . '"';
+		$header = preg_replace('/\r?\n(?!\t| )/', '', $header);
+		drupal_set_header($header);
+	}
+	
+	return $form;
+}
+
+
+/**
+ *
+ */
+function promoki_select_finished_form_validate($form, &$form_state) {
+
+}
+
+
+/**
+ *
+ */
+function promoki_select_finished_form_submit($form, &$form_state) {
+
+}
+
+
+/**
+ * Display help and module information
+ * @param path which path of the site we're displaying help
+ * @param arg array that holds the current path as would be returned from arg() function
+ * @return help text for the path
+ */
+function promoki_help($path, $arg) {
+	$o = '';  // declare your output variable
+	switch ($path) {
+		case "admin/help#promoki":
+			$o .= '<p>'. 
+				t('Aids in the random selection of promotion winners.') .'</p>';
+			break;
+	}
+	return $o;
+}
+
+
+/**
+ * Implements hook_menu().
+ */
+function promoki_menu() {
+
+	$items = array();
+	
+	// Always accessible, accepts POST data from ???'s
+	// servers when being sent a postback.
+	$items[???_NOTIFY_URL] = array(
+		'title' => '??? Notifications',
+		'access callback' => TRUE,
+		'page callback' => 'promoki_???_notification',
+		'type' => MENU_CALLBACK,
+		'file' => 'promoki.notify.inc',
+	);
+
+	// Always accessible, starts up an export to the admin's system
+	// so the admin can download the winners list as a file; must be
+	// visited with the parameters 'datavarname', 'filename' and 'ext'
+	$items['admin/settings/promoki/export_winners'] = array(
+		'title' => 'Winners List Export',
+		'access callback' => TRUE,
+		'page callback' => 'promoki_begin_export',
+		'type' => MENU_CALLBACK,
+	);
+
+	// parent admin menu
+	$items['admin/settings/promoki'] = array(
+		'title' => 'Promoki',
+		'description' => t('Basic settings and features of the Promoki module.'),
+		'page callback' => 'promoki_settings_overview',
+		'access arguments' => array('access administration pages'),
+		'type' => MENU_NORMAL_ITEM,
+	);
+
+	// overview page for the settings (the default)
+  $items['admin/settings/promoki/overview'] = array(
+    'title' => 'Overview',
+    'description' => 'View the Promoki settings.',
+		'page callback' => 'promoki_settings_overview',
+    'access arguments' => array('access administration pages'),
+    'weight' => -10,
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+  );
+  
+  // page to edit the settings
+  $items['admin/settings/promoki/edit'] = array(
+    'title' => 'Edit',
+    'description' => 'Edit the Promoki settings.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('promoki_settings_form'),
+    'access arguments' => array('access administration pages'),
+    'weight' => -5,
+    'type' => MENU_LOCAL_TASK,
+  );
+  
+  // page to display the winners and allow editing their notes
+  $items['admin/settings/promoki/prev_winners'] = array(
+    'title' => 'Winners',
+    'description' => 'Allows viewing of previous winners, and editing their notes. Can be called with various URL parameters to display certain winners, or alter the display order, etc.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array ('promoki_winners_form'),
+    'access arguments' => array('access administration pages'),
+    'weight' => 0,
+    'type' => MENU_LOCAL_TASK,
+  );
+
+  // page to begin the winner selection process
+  $items['admin/settings/promoki/select'] = array(
+    'title' => 'Select',
+    'description' => 'The "start page" of the winner random selection process. URL parameters will indicate moving to the next pages ("choose" and "finished".)',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array ('promoki_select_form'),
+    'access arguments' => array('access administration pages'),
+    'weight' => 5,
+    'type' => MENU_LOCAL_TASK,
+  );
+
+	return $items;
+	
+} // end function - promoki_menu
+
+
+/**
+ * Displays an overview of the Promoki settings.
+ */
+function promoki_settings_overview() {
+  // Theme all the pages beneath this path into summary overviews.
+  return theme('summary_overview', summarize_child_form_pages('admin/settings/promoki'));
+}
+
+
+/******************************************************/
+
+/**
+ *
+ */
+function promoki_get_random_selection($select_size) {
+
+	$selection = array();
+	
+	if (!is_numeric($select_size) || ($select_size < 1)) {
+		return $selection;
+	}
+	
+	$source = variable_get('promoki_winner_source', 'users');
+	$allow_admins = variable_get('promoki_allow_admins', FALSE);
+
+	switch ($source) {
+	
+		case 'users':
+		
+			if ($allow_admins) {
+				$tables = '{users}';
+				$admin_limit = '';
+			}
+			else {
+				$tables = '{users, users_roles, role}';
+				$admin_limit = "AND users.uid = users_roles.uid AND users_roles.rid = role.rid AND role.name LIKE '%%admin%%' ";
+			}
+			
+			// we will cheat and order the table by a random-data field ('pass'),
+			// excluding records with that field being NULL, and excluding
+			// records that tie to roles that are like 'admin', then select the top
+			// several that we need; we exclude user-ids 0 and 1 for good measure
+			$sql = "SELECT mail FROM " . $tables " WHERE pass <> '' AND pass <> NULL AND mail <> '' AND mail <> NULL AND users.uid > 1 " . $admin_limit . "GROUP BY mail ORDER BY pass LIMIT %d";
+			
+			$data = db_query($sql, $select_size);
+			
+			while ($record = db_fetch_array($data)) {
+				$selection[] = $record;
+			}
+
+			break;
+			
+		case 'getresponse':
+		
+			// if source is the GetResponse.com account...
+			// first, log into the account to access the data
+			
+			// next pull out the data we need (plus extra, if disallowing admins)
+			
+			// finally, exclude admins from the list, if necessary
+			if (!$allow_admins) {
+				foreach ($selection as $key => $record) {
+					$mail = $record['mail'];
+					$is_admin = db_result(db_query("SELECT COUNT(mail) FROM {users, users_roles, role} WHERE mail = '%s' AND users.uid = users_roles.uid AND users_roles.rid = role.rid AND role.name LIKE '%%admin%%' GROUP BY mail LIMIT 1", $mail));
+					if ($is_admin) {
+						unset($selection[$key]);
+					}
+				}
+				// if too many potential winners left, trim the list
+				$extra = count($selection) - $select_size;
+				if ($extra > 0) {
+					$selection = array_values($selection);
+					array_splice($selection, 0, $extra);
+					$selection = array_values($selection);
+				}
+				
+			} // end check to see if disallowing admins
+			
+	} // end switch ($source)
+	
+	return $selection;
+}
+
+
+/******************************************************/
+
+/****/
+function promoki_begin_export() {
+
+	$ext_type = $_GET['ext'];
+	$fname = $_GET['filename'];
+	$dataname = $_GET['datavarname'];
+	
+	if (!$ext_type || !$fname || !$dataname) {
+		return;
+	}
+
+	$ext_arr = array('csv' => '.csv', 'xml' => '.xml', 'json' => '.json');
+	$ext = $ext_arr[$ext_type];
+	$fullfname = $fname . $ext;
+
+	$data = variable_get($dataname, '');
+	variable_del($dataname);
+	
+	promoki_export_download($data, $fullfname);
+
+}
+
+
+// Export (for download) file containing winners
+function promoki_export_download($data, $filename) {
+
+	ob_end_clean();
+	
+	$http_headers = array(
+		'Pragma: no-cache',
+		'Expires: 0',
+		'Cache-Control: no-cache, must-revalidate',
+		'Cache-Control: private',
+		'Content-Transfer-Encoding: binary',
+		'Content-Length:'. strlen($data),
+		'Content-Disposition: attachment; filename="' . $filename . '"',
+		'Content-Type: application/octet-stream'
+	);
+
+	foreach ($http_headers as $header) {
+		$header = preg_replace('/\r?\n(?!\t| )/', '', $header);
+		drupal_set_header($header);
+	}
+
+	print $data;
+	
+  exit();
+}
+
+
+/**
+ *
+ * Checks next Promoki promo date; if it is to occur within 24 hours, alert the admin.
+ *
+ */
+function promoki_cron() {
+
+	// execute scheduled sends
+	telemo_execute_next_scheduled_actions();
+
+	// get the services
+	$services = _telemo_all_services('rebuild');
+	
+	// loop through all the services
+	foreach ($services as $service) {
+	
+		$funcname_prefix = 'tm_' . $service['id'] . '_feature_';
+		
+		// loop through all the features
+		foreach ($service['features'] as $feature) {
+			// execute the cron function, if any, for the feature
+			$funcname = $funcname_prefix . $feature['id'] . '_cron';
+			if (function_exists($funcname)) {
+				call_user_func($funcname);
+			}
+		}
+
+	}
+
+}
+
+
+/**
+ * Returns a list of options for data sources from which to pull promo winners.
+ */
+function _promoki_winner_source_array() {
+
+	$arr = array(
+		'users' => 'Website users',
+		'getresponse' => 'GetResponse.com account',
+	);
+	
+	return $arr;
+}
+
+
+/**
+ * Converts a timestamp to a 3-element date array for use in a form.
+ */
+function _promoki_timestamp_to_date_array($ts) {
+
+	$date_arr = FALSE;
+	
+	if (is_numeric($ts) && ($ts >= 1)) {
+		$d = getdate($ts);
+		$date_arr = array();
+		$date_arr['day'] = $d['mday'];
+		$date_arr['month'] = $d['mon'];
+		$date_arr['year'] = $d['year'];
+	}
+	
+	return $date_arr;
+}
+
+
+/**
+ * Converts a 3-element date array (as used in a form) into a timestamp.
+ */
+function _promoki_date_array_to_timestamp($date_arr) {
+
+	$ts = 0;
+	
+	if (is_array($date_arr) && (count($date_arr) >= 3)) {
+		$day = $date_arr['day'];
+		$month = $date_arr['month'];
+		$year = $date_arr['year'];
+		$ts = mktime(0, 0, 0, $month, $day, $year);
+	}
+	
+	return $ts;
+}

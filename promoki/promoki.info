@@ -1,0 +1,4 @@
+name = "Promoki"
+description = "Aids in the random selection of winners of a promotion."
+package = Promoki
+core = 6.x
